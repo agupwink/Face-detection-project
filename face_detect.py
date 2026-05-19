@@ -88,7 +88,7 @@ ACCESSORY_COLORS = {
     "Helmet":    (50, 50, 220),
     "Watch":     (0, 230, 200),
     # Fashion detector colours
-    "Hat":       (0, 140, 255),
+    "Hat":       (0, 120, 255),
     "Headband":  (180, 60, 255),
     "Tie":       (100, 180, 80),
     "Scarf":     (0, 200, 180),
@@ -225,14 +225,24 @@ class WatchDetector:
     """
 
     def __init__(self):
-        print(f"Loading watch model ({WATCH_MODEL_NAME}) …")
+        print(f"Loading watch/hat model ({WATCH_MODEL_NAME}) …")
         self._model = YOLO(WATCH_MODEL_NAME)  # downloads to ultralytics cache if absent
-        # Find the Watch class ID(s) — Open Images uses title-case "Watch"
+
+        # Watch class IDs
         self._watch_ids = [
             idx for idx, name in self._model.names.items()
             if "watch" in name.lower()
         ]
-        print(f"Watch classes: { [self._model.names[i] for i in self._watch_ids] }")
+        # Hat class IDs — covers Hat, Cowboy hat, Fedora, Sun hat, Swim cap
+        HAT_KEYWORDS = ("hat", "cap", "fedora", "beret", "beanie")
+        self._hat_ids = [
+            idx for idx, name in self._model.names.items()
+            if any(k in name.lower() for k in HAT_KEYWORDS)
+            and "helmet" not in name.lower()  # helmets handled by PPE model
+        ]
+        self._all_ids = self._watch_ids + self._hat_ids
+        print(f"Watch classes : {[self._model.names[i] for i in self._watch_ids]}")
+        print(f"Hat classes   : {[self._model.names[i] for i in self._hat_ids]}")
 
         self._queue   = queue.Queue(maxsize=1)
         self._results : list = []
@@ -266,16 +276,18 @@ class WatchDetector:
     def _infer(self, frame_bgr) -> list:
         results = self._model(
             frame_bgr, conf=WATCH_CONF,
-            classes=self._watch_ids,  # only score Watch — skip all 599 other classes
-            imgsz=WATCH_IMGSZ,        # upsample before inference — catches small/distant watches
+            classes=self._all_ids,  # Watch + Hat family — skip all other 590+ classes
+            imgsz=WATCH_IMGSZ,
             verbose=False,
         )
         detections = []
         for result in results:
             for box in result.boxes:
-                conf = float(box.conf[0])
+                cls_id = int(box.cls[0])
+                conf   = float(box.conf[0])
                 x1, y1, x2, y2 = (int(v) for v in box.xyxy[0])
-                detections.append(("Watch", conf, x1, y1, x2, y2))
+                label = "Watch" if cls_id in self._watch_ids else "Hat"
+                detections.append((label, conf, x1, y1, x2, y2))
         return detections
 
 
