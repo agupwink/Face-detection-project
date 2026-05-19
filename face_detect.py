@@ -20,6 +20,8 @@ try:
         AutoModelForImageClassification,
         YolosImageProcessor,
         YolosForObjectDetection,
+        ViTForImageClassification,
+        ViTImageProcessor,
     )
     from PIL import Image as PILImage
     TRANSFORMERS_AVAILABLE = True
@@ -48,6 +50,9 @@ ROI_PAD         = 20    # extra pixels around face ROI improves hat/glasses dete
 WATCH_CONF       = 0.28  # min confidence for watch detection
 WATCH_IMGSZ      = 1280  # larger input → model sees more detail → better small-object detection
 WATCH_MODEL_NAME = "yolov8n-oiv7.pt"  # Open Images V7 nano — has real-world Watch class
+
+# Age detection — nateraw/vit-age-classifier (ViT, 9 buckets, auto-downloads)
+AGE_MODEL_ID = "nateraw/vit-age-classifier"
 
 # Class names from keremberke/yolov8m-protective-equipment-detection (accessories.pt).
 # The model's full class list: glove, goggles, helmet, mask, no_glove, no_goggles,
@@ -251,14 +256,72 @@ class WatchDetector:
 
 
 # ---------------------------------------------------------------------------
+# Age detector (cv2.dnn Caffe model, runs on face ROI in background thread)
+# ---------------------------------------------------------------------------
+
+class AgeDetector:
+    """
+    Predicts age from a face ROI using nateraw/vit-age-classifier (ViT).
+    Returns one of 9 age-range strings: 0-2, 3-9, 10-19, 20-29 … more than 70.
+    Runs in a background thread; never blocks the display loop.
+    """
+
+    def __init__(self):
+        print(f"Loading age model ({AGE_MODEL_ID}) …")
+        self._processor = ViTImageProcessor.from_pretrained(AGE_MODEL_ID)
+        self._model     = ViTForImageClassification.from_pretrained(AGE_MODEL_ID)
+        self._model.eval()
+        self._queue  = queue.Queue(maxsize=1)
+        self._result = None   # age range string, e.g. "20-29"
+        self._lock   = threading.Lock()
+        self._thread = threading.Thread(target=self._worker, daemon=True)
+        self._thread.start()
+
+    def submit(self, face_roi_bgr) -> None:
+        if face_roi_bgr is None or face_roi_bgr.size == 0:
+            return
+        try:
+            self._queue.put_nowait(face_roi_bgr.copy())
+        except queue.Full:
+            pass
+
+    def get_result(self):
+        """Return age range string or None if no result yet."""
+        with self._lock:
+            return self._result
+
+    def stop(self) -> None:
+        self._queue.put(None)
+        self._thread.join()
+
+    def _worker(self) -> None:
+        while True:
+            roi = self._queue.get()
+            if roi is None:
+                break
+            pil    = PILImage.fromarray(cv2.cvtColor(roi, cv2.COLOR_BGR2RGB))
+            inputs = self._processor(images=pil, return_tensors="pt")
+            with torch.no_grad():
+                logits = self._model(**inputs).logits
+            label = self._model.config.id2label[logits.argmax(-1).item()]
+            with self._lock:
+                self._result = label
+            time.sleep(0.04)  # ~25 fps max — yield CPU to display loop
+
+
+# ---------------------------------------------------------------------------
 # Drawing helpers
 # ---------------------------------------------------------------------------
 
-def draw_face_label(frame, x1, y1, x2, y2, confidence: float) -> None:
-    """Draw the gold bounding box and HUMAN DETECTED badge (unchanged behaviour)."""
+def draw_face_label(frame, x1, y1, x2, y2, confidence: float, age=None) -> None:
+    """Draw the gold bounding box and HUMAN DETECTED badge with optional age."""
     cv2.rectangle(frame, (x1, y1), (x2, y2), BOX_COLOR, 2)
 
-    label = f"  HUMAN DETECTED  {confidence * 100:.1f}%  "
+    label = f"  HUMAN DETECTED  {confidence * 100:.1f}%"
+    if age:
+        label += f"  |  Age: {age}  "
+    else:
+        label += "  "
     font       = cv2.FONT_HERSHEY_DUPLEX
     font_scale = 0.8
     thickness  = 2
@@ -314,7 +377,18 @@ def main():
         acc_detector = AccessoryDetector(ACCESSORY_MODEL)
         print("Accessory detection: ENABLED")
 
-    # Stage 3: load watch detector (uses same ultralytics YOLO, auto-downloads model)
+    # Stage 3: load age detector
+    age_detector = None
+    if not TRANSFORMERS_AVAILABLE:
+        print("transformers not installed — age detection disabled.")
+    else:
+        try:
+            age_detector = AgeDetector()
+            print("Age detection: ENABLED")
+        except Exception as e:
+            print(f"Age detector failed to load: {e}")
+
+    # Stage 4: load watch detector (uses same ultralytics YOLO, auto-downloads model)
     watch_detector = None
     if not YOLO_AVAILABLE:
         print("ultralytics not installed — watch detection disabled.")
@@ -356,7 +430,14 @@ def main():
             x2 = min(w, int(detections[0, 0, i, 5] * w))
             y2 = min(h, int(detections[0, 0, i, 6] * h))
 
-            draw_face_label(frame, x1, y1, x2, y2, confidence)
+            # ---- Age prediction on face ROI (async) ----
+            age_str = None
+            if age_detector and (x2 - x1) >= ROI_MIN_PX:
+                face_crop = frame[y1:y2, x1:x2]
+                age_detector.submit(face_crop)
+                age_str = age_detector.get_result()
+
+            draw_face_label(frame, x1, y1, x2, y2, confidence, age=age_str)
 
             # ---- Stage 2: accessory detection on face ROI (async) ----
             if acc_detector and (x2 - x1) >= ROI_MIN_PX:
@@ -382,6 +463,8 @@ def main():
         if cv2.waitKey(1) & 0xFF == ord("q"):
             break
 
+    if age_detector:
+        age_detector.stop()
     if acc_detector:
         acc_detector.stop()
     if watch_detector:
