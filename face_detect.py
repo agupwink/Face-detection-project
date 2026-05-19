@@ -54,6 +54,21 @@ WATCH_MODEL_NAME = "yolov8n-oiv7.pt"  # Open Images V7 nano — has real-world W
 # Age detection — nateraw/vit-age-classifier (ViT, 9 buckets, auto-downloads)
 AGE_MODEL_ID = "nateraw/vit-age-classifier"
 
+# Fashion detection — valentinafevu/yolos-fashionpedia (46 classes, full frame)
+FASHION_CONF     = 0.45
+FASHION_MODEL_ID = "valentinafevu/yolos-fashionpedia"
+# Fashionpedia label → display name. Glasses and watch are excluded (dedicated detectors).
+FASHION_TARGETS = {
+    "hat":                                       "Hat",
+    "headband, head covering, hair accessory":   "Headband",
+    "tie":                                       "Tie",
+    "scarf":                                     "Scarf",
+    "glove":                                     "Glove",
+    "belt":                                      "Belt",
+    "bag, wallet":                               "Bag",
+    "umbrella":                                  "Umbrella",
+}
+
 # Class names from keremberke/yolov8m-protective-equipment-detection (accessories.pt).
 # The model's full class list: glove, goggles, helmet, mask, no_glove, no_goggles,
 # no_helmet, no_mask, no_shoes, shoes  — "no_*" variants are intentionally excluded.
@@ -72,6 +87,15 @@ ACCESSORY_COLORS = {
     "Hat/Cap":   (200, 50, 200),
     "Helmet":    (50, 50, 220),
     "Watch":     (0, 230, 200),
+    # Fashion detector colours
+    "Hat":       (0, 140, 255),
+    "Headband":  (180, 60, 255),
+    "Tie":       (100, 180, 80),
+    "Scarf":     (0, 200, 180),
+    "Glove":     (30, 100, 160),
+    "Belt":      (0, 165, 255),
+    "Bag":       (130, 60, 200),
+    "Umbrella":  (200, 200, 0),
 }
 
 
@@ -237,7 +261,7 @@ class WatchDetector:
                 break
             with self._lock:
                 self._results = self._infer(frame)
-            time.sleep(0.08)  # cap at ~12 fps — imgsz=1280 is expensive; yield CPU
+            time.sleep(0.15)  # cap at ~6 fps — imgsz=1280 is expensive; yield CPU
 
     def _infer(self, frame_bgr) -> list:
         results = self._model(
@@ -252,6 +276,83 @@ class WatchDetector:
                 conf = float(box.conf[0])
                 x1, y1, x2, y2 = (int(v) for v in box.xyxy[0])
                 detections.append(("Watch", conf, x1, y1, x2, y2))
+        return detections
+
+
+# ---------------------------------------------------------------------------
+# Fashion detector (YOLOS-Fashionpedia, runs on the full frame)
+# ---------------------------------------------------------------------------
+
+class FashionDetector:
+    """
+    Uses valentinafevu/yolos-fashionpedia (46 fashion classes) to detect
+    wearable accessories on the full frame. Glasses and watch are excluded
+    — those have dedicated detectors. Runs in a background thread.
+    """
+
+    def __init__(self):
+        print(f"Loading fashion model ({FASHION_MODEL_ID}) …")
+        self._processor = YolosImageProcessor.from_pretrained(FASHION_MODEL_ID)
+        self._model     = YolosForObjectDetection.from_pretrained(FASHION_MODEL_ID)
+        self._model.eval()
+
+        # Map model label index → display name for the classes we care about
+        self._label_map: dict[int, str] = {}
+        for idx, label in self._model.config.id2label.items():
+            display = FASHION_TARGETS.get(label.lower())
+            if display:
+                self._label_map[idx] = display
+
+        print(f"Fashion classes active: {sorted(set(self._label_map.values()))}")
+
+        self._queue   = queue.Queue(maxsize=1)
+        self._results : list = []
+        self._lock    = threading.Lock()
+        self._thread  = threading.Thread(target=self._worker, daemon=True)
+        self._thread.start()
+
+    def submit(self, frame_bgr) -> None:
+        try:
+            self._queue.put_nowait(frame_bgr.copy())
+        except queue.Full:
+            pass
+
+    def get_results(self) -> list:
+        with self._lock:
+            return list(self._results)
+
+    def stop(self) -> None:
+        self._queue.put(None)
+        self._thread.join()
+
+    def _worker(self) -> None:
+        while True:
+            frame = self._queue.get()
+            if frame is None:
+                break
+            with self._lock:
+                self._results = self._infer(frame)
+            time.sleep(0.20)  # ~5 fps max — transformer on full frame is heavy; yield CPU
+
+    def _infer(self, frame_bgr) -> list:
+        h, w    = frame_bgr.shape[:2]
+        pil_img = PILImage.fromarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
+        inputs  = self._processor(images=pil_img, return_tensors="pt")
+
+        with torch.no_grad():
+            outputs = self._model(**inputs)
+
+        results = self._processor.post_process_object_detection(
+            outputs, threshold=FASHION_CONF,
+            target_sizes=torch.tensor([[h, w]])
+        )[0]
+
+        detections = []
+        for score, label, box in zip(results["scores"], results["labels"], results["boxes"]):
+            display = self._label_map.get(label.item())
+            if display:
+                x1, y1, x2, y2 = (int(v) for v in box.tolist())
+                detections.append((display, float(score), x1, y1, x2, y2))
         return detections
 
 
@@ -355,6 +456,11 @@ def draw_accessory_boxes(frame, accessories: list) -> None:
 # ---------------------------------------------------------------------------
 
 def main():
+    # Limit PyTorch thread count so multiple background models don't fight over all CPU cores
+    if TRANSFORMERS_AVAILABLE:
+        torch.set_num_threads(2)
+        torch.set_num_interop_threads(2)
+
     # Validate face detection model files
     for path in (PROTOTXT, CAFFEMODEL):
         if not os.path.exists(path):
@@ -398,6 +504,17 @@ def main():
             print("Watch detection: ENABLED")
         except Exception as e:
             print(f"Watch detector failed to load: {e}")
+
+    # Stage 5: load fashion detector (YOLOS-Fashionpedia, hat/scarf/tie/bag/etc.)
+    fashion_detector = None
+    if not TRANSFORMERS_AVAILABLE:
+        print("transformers not installed — fashion detection disabled.")
+    else:
+        try:
+            fashion_detector = FashionDetector()
+            print("Fashion detection: ENABLED")
+        except Exception as e:
+            print(f"Fashion detector failed to load: {e}")
 
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
@@ -459,6 +576,11 @@ def main():
             watch_detector.submit(frame)
             draw_accessory_boxes(frame, watch_detector.get_results())
 
+        # ---- Stage 5: fashion detection on full frame (async) ----
+        if fashion_detector:
+            fashion_detector.submit(frame)
+            draw_accessory_boxes(frame, fashion_detector.get_results())
+
         cv2.imshow(label, frame)
         if cv2.waitKey(1) & 0xFF == ord("q"):
             break
@@ -469,6 +591,8 @@ def main():
         acc_detector.stop()
     if watch_detector:
         watch_detector.stop()
+    if fashion_detector:
+        fashion_detector.stop()
     cap.release()
     cv2.destroyAllWindows()
 
