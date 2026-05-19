@@ -17,11 +17,10 @@ try:
     import torch
     import torchvision.transforms as T
     from transformers import (
+        AutoImageProcessor,
         AutoModelForImageClassification,
         YolosImageProcessor,
         YolosForObjectDetection,
-        ViTForImageClassification,
-        ViTImageProcessor,
     )
     from PIL import Image as PILImage
     TRANSFORMERS_AVAILABLE = True
@@ -51,8 +50,8 @@ WATCH_CONF       = 0.28  # min confidence for watch detection
 WATCH_IMGSZ      = 1280  # larger input → model sees more detail → better small-object detection
 WATCH_MODEL_NAME = "yolov8n-oiv7.pt"  # Open Images V7 nano — has real-world Watch class
 
-# Age detection — nateraw/vit-age-classifier (ViT, 9 buckets, auto-downloads)
-AGE_MODEL_ID = "nateraw/vit-age-classifier"
+# Age detection — iitolstykh/mivolo_v2 (MiVOLO, predicts exact integer age)
+AGE_MODEL_ID = "iitolstykh/mivolo_v2"
 
 # Fashion detection — valentinafevu/yolos-fashionpedia (46 classes, full frame)
 FASHION_CONF     = 0.45
@@ -374,18 +373,20 @@ class FashionDetector:
 
 class AgeDetector:
     """
-    Predicts age from a face ROI using nateraw/vit-age-classifier (ViT).
-    Returns one of 9 age-range strings: 0-2, 3-9, 10-19, 20-29 … more than 70.
+    Predicts exact age from a face ROI using MiVOLO (iitolstykh/mivolo_v2).
+    Returns an integer age string, e.g. "27".
     Runs in a background thread; never blocks the display loop.
     """
 
     def __init__(self):
         print(f"Loading age model ({AGE_MODEL_ID}) …")
-        self._processor = ViTImageProcessor.from_pretrained(AGE_MODEL_ID)
-        self._model     = ViTForImageClassification.from_pretrained(AGE_MODEL_ID)
+        self._processor = AutoImageProcessor.from_pretrained(AGE_MODEL_ID, trust_remote_code=True)
+        self._model     = AutoModelForImageClassification.from_pretrained(
+            AGE_MODEL_ID, trust_remote_code=True, dtype=torch.float32
+        )
         self._model.eval()
         self._queue  = queue.Queue(maxsize=1)
-        self._result = None   # age range string, e.g. "20-29"
+        self._result = None   # age integer string, e.g. "27"
         self._lock   = threading.Lock()
         self._thread = threading.Thread(target=self._worker, daemon=True)
         self._thread.start()
@@ -399,7 +400,7 @@ class AgeDetector:
             pass
 
     def get_result(self):
-        """Return age range string or None if no result yet."""
+        """Return age string or None if no result yet."""
         with self._lock:
             return self._result
 
@@ -412,13 +413,14 @@ class AgeDetector:
             roi = self._queue.get()
             if roi is None:
                 break
-            pil    = PILImage.fromarray(cv2.cvtColor(roi, cv2.COLOR_BGR2RGB))
-            inputs = self._processor(images=pil, return_tensors="pt")
+            # processor expects BGR numpy arrays; it handles RGB conversion internally
+            inputs = self._processor([roi, None])  # [face_crop, no_body_crop]
+            pv = inputs.pixel_values               # [2, 3, 384, 384]
             with torch.no_grad():
-                logits = self._model(**inputs).logits
-            label = self._model.config.id2label[logits.argmax(-1).item()]
+                out = self._model(faces_input=pv[0:1], body_input=pv[1:2], return_dict=True)
+            age = round(out.age_output[0][0].item())
             with self._lock:
-                self._result = label
+                self._result = str(age)
             time.sleep(0.04)  # ~25 fps max — yield CPU to display loop
 
 
