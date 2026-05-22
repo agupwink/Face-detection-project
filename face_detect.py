@@ -43,6 +43,7 @@ CAFFEMODEL = os.path.join(BASE_DIR, "res10_300x300_ssd_iter_140000.caffemodel")
 # Accessory detection constants (new)
 # ---------------------------------------------------------------------------
 ACCESSORY_CONF  = 0.45                                  # min confidence for face accessories
+GLASSES_CONF    = 0.75                                  # higher bar for binary glasses classifier (reduces false positives from JPEG compression)
 ACCESSORY_MODEL = os.path.join(BASE_DIR, "accessories.pt")  # YOLOv8 weights file
 ROI_MIN_PX      = 60    # skip accessory detection for faces narrower than this
 ROI_PAD         = 20    # extra pixels around face ROI improves hat/glasses detection
@@ -202,7 +203,7 @@ class AccessoryDetector:
             tensor   = self._glasses_tf(PILImage.fromarray(roi_rgb)).unsqueeze(0)
             with torch.no_grad():
                 conf = torch.softmax(self._glasses_model(tensor).logits, dim=-1)[0][0].item()
-            if conf >= ACCESSORY_CONF:
+            if conf >= GLASSES_CONF:
                 # Classifier gives no box — estimate eye-band from face proportions
                 rh, rw   = roi_bgr.shape[:2]
                 ex1, ey1 = int(rw * 0.10), int(rh * 0.25)

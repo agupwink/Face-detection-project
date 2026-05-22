@@ -1,0 +1,6 @@
+frontend/node_modules
+data/
+__pycache__
+**/__pycache__
+*.pyc
+.git

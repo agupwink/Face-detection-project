@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data/frames:/data/frames
+      - ./data/chromadb:/data/chromadb
+      - hf_cache:/root/.cache/huggingface
+      - torch_cache:/root/.cache/torch
+      - ultralytics_cache:/root/.config/Ultralytics
+    environment:
+      - FRAMES_PATH=/data/frames
+      - CHROMADB_PATH=/data/chromadb
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  hf_cache:
+  torch_cache:
+  ultralytics_cache:
