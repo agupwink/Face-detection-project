@@ -368,7 +368,7 @@ class FashionDetector:
 
 
 # ---------------------------------------------------------------------------
-# Age detector (cv2.dnn Caffe model, runs on face ROI in background thread)
+# Age detector (MiVOLO, runs on face ROI in background thread)
 # ---------------------------------------------------------------------------
 
 class AgeDetector:
@@ -386,7 +386,7 @@ class AgeDetector:
         )
         self._model.eval()
         self._queue  = queue.Queue(maxsize=1)
-        self._result = None   # age integer string, e.g. "27"
+        self._result = None
         self._lock   = threading.Lock()
         self._thread = threading.Thread(target=self._worker, daemon=True)
         self._thread.start()
@@ -413,7 +413,6 @@ class AgeDetector:
             roi = self._queue.get()
             if roi is None:
                 break
-            # processor expects BGR numpy arrays; it handles RGB conversion internally
             inputs = self._processor([roi, None])  # [face_crop, no_body_crop]
             pv = inputs.pixel_values               # [2, 3, 384, 384]
             with torch.no_grad():
@@ -564,8 +563,7 @@ def main():
             # ---- Age prediction on face ROI (async) ----
             age_str = None
             if age_detector and (x2 - x1) >= ROI_MIN_PX:
-                face_crop = frame[y1:y2, x1:x2]
-                age_detector.submit(face_crop)
+                age_detector.submit(frame[y1:y2, x1:x2])
                 age_str = age_detector.get_result()
 
             draw_face_label(frame, x1, y1, x2, y2, confidence, age=age_str)
