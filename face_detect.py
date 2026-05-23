@@ -386,10 +386,11 @@ class AgeDetector:
             AGE_MODEL_ID, trust_remote_code=True, dtype=torch.float32
         )
         self._model.eval()
-        self._queue  = queue.Queue(maxsize=1)
-        self._result = None
-        self._lock   = threading.Lock()
-        self._thread = threading.Thread(target=self._worker, daemon=True)
+        self._queue      = queue.Queue(maxsize=1)
+        self._result     = None
+        self._lock       = threading.Lock()
+        self._model_lock = threading.Lock()
+        self._thread     = threading.Thread(target=self._worker, daemon=True)
         self._thread.start()
 
     def submit(self, face_roi_bgr) -> None:
@@ -405,6 +406,10 @@ class AgeDetector:
         with self._lock:
             return self._result
 
+    def reset(self) -> None:
+        with self._lock:
+            self._result = None
+
     def stop(self) -> None:
         self._queue.put(None)
         self._thread.join()
@@ -416,8 +421,9 @@ class AgeDetector:
                 break
             inputs = self._processor([roi, None])  # [face_crop, no_body_crop]
             pv = inputs.pixel_values               # [2, 3, 384, 384]
-            with torch.no_grad():
-                out = self._model(faces_input=pv[0:1], body_input=pv[1:2], return_dict=True)
+            with self._model_lock:
+                with torch.no_grad():
+                    out = self._model(faces_input=pv[0:1], body_input=pv[1:2], return_dict=True)
             age = round(out.age_output[0][0].item())
             with self._lock:
                 self._result = str(age)

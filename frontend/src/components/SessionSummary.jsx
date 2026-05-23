@@ -1,3 +1,5 @@
+import { useState } from 'react'
+
 const LABEL_COLORS = {
   Glasses:   '#32c832',
   'Face Mask': '#ff9632',
@@ -27,6 +29,25 @@ export default function SessionSummary({ data, onNewSession }) {
     captured_faces = [],
   } = data
 
+  const [feedbackAge, setFeedbackAge] = useState(avg_age ? String(avg_age) : '')
+  const [feedbackStatus, setFeedbackStatus] = useState('idle') // idle | submitting | done | skipped
+
+  const submitFeedback = async () => {
+    const age = parseInt(feedbackAge, 10)
+    if (!age || age < 1 || age > 120) return
+    setFeedbackStatus('submitting')
+    try {
+      await fetch(`/api/session/${session_id}/feedback`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ real_age: age }),
+      })
+    } catch {
+      // silently fail — still mark done
+    }
+    setFeedbackStatus('done')
+  }
+
   const allItems = { ...accessories, ...fashion_items }
   const hasItems = Object.keys(allItems).length > 0
 
@@ -48,6 +69,86 @@ export default function SessionSummary({ data, onNewSession }) {
 
         {total_detections > 0 ? (
           <>
+            {/* Age feedback card */}
+            {feedbackStatus !== 'skipped' && (
+              <div style={{
+                background: '#0e0e1a',
+                border: '1px solid #2a2a1e',
+                borderRadius: '12px',
+                padding: '22px 24px',
+                marginBottom: '20px',
+              }}>
+                {feedbackStatus === 'done' ? (
+                  <div style={{ textAlign: 'center', padding: '8px 0' }}>
+                    <span style={{ color: '#32c832', fontSize: '1.1rem', fontWeight: 700 }}>Thanks!</span>
+                    <span style={{ color: '#44445a', fontSize: '0.9rem', marginLeft: '10px' }}>
+                      Age model will improve over time.
+                    </span>
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '16px', flexWrap: 'wrap' }}>
+                    <div style={{ flex: 1, minWidth: '160px' }}>
+                      <div style={{ color: '#d4a017', fontWeight: 700, fontSize: '0.88rem', marginBottom: '4px' }}>
+                        Help improve age detection
+                      </div>
+                      <div style={{ color: '#44445a', fontSize: '0.8rem' }}>
+                        {avg_age ? `We predicted age ${avg_age}. ` : ''}What is your actual age?
+                      </div>
+                    </div>
+                    <input
+                      type="number"
+                      min="1"
+                      max="120"
+                      value={feedbackAge}
+                      onChange={e => setFeedbackAge(e.target.value)}
+                      onKeyDown={e => e.key === 'Enter' && submitFeedback()}
+                      placeholder="Your age"
+                      style={{
+                        width: '90px',
+                        padding: '9px 12px',
+                        background: '#12121e',
+                        border: '1px solid #2a2a2e',
+                        borderRadius: '8px',
+                        color: '#c0c0d8',
+                        fontSize: '0.95rem',
+                        outline: 'none',
+                        textAlign: 'center',
+                      }}
+                    />
+                    <button
+                      onClick={submitFeedback}
+                      disabled={feedbackStatus === 'submitting' || !feedbackAge}
+                      style={{
+                        padding: '9px 20px',
+                        background: feedbackStatus === 'submitting' || !feedbackAge ? '#1a1a2e' : '#d4a017',
+                        color: feedbackStatus === 'submitting' || !feedbackAge ? '#44445a' : '#080808',
+                        border: 'none',
+                        borderRadius: '8px',
+                        fontWeight: 700,
+                        fontSize: '0.88rem',
+                        cursor: feedbackStatus === 'submitting' || !feedbackAge ? 'default' : 'pointer',
+                      }}
+                    >
+                      {feedbackStatus === 'submitting' ? 'Saving…' : 'Submit'}
+                    </button>
+                    <button
+                      onClick={() => setFeedbackStatus('skipped')}
+                      style={{
+                        background: 'none',
+                        border: 'none',
+                        color: '#33334a',
+                        fontSize: '0.8rem',
+                        cursor: 'pointer',
+                        padding: '4px',
+                      }}
+                    >
+                      Skip
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Stat cards */}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '14px', marginBottom: '28px' }}>
               <StatCard label="Detections" value={total_detections} />

@@ -12,10 +12,12 @@ import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
 from pipeline import DetectionPipeline
 from embeddings import get_face_embedding
 from storage import store_detection, get_session_results, find_similar_faces
+from trainer import save_sample, start_finetune_async
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FRAMES_PATH = os.getenv("FRAMES_PATH", os.path.join(_PROJECT_ROOT, "data", "frames"))
@@ -91,6 +93,45 @@ async def start_session():
 async def end_session(session_id: str):
     detections = get_session_results(session_id)
     return _build_summary(session_id, detections)
+
+
+class FeedbackRequest(BaseModel):
+    real_age: int
+
+
+@app.post("/api/session/{session_id}/feedback")
+async def session_feedback(session_id: str, body: FeedbackRequest):
+    if not (1 <= body.real_age <= 120):
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"error": "Age must be between 1 and 120"}, status_code=422)
+
+    detections = get_session_results(session_id)
+    frame_paths = [
+        str(Path(FRAMES_PATH) / d["frame_path"])
+        for d in detections
+        if d.get("frame_path")
+    ]
+    ages = [int(d["age"]) for d in detections if d.get("age") and str(d["age"]).isdigit()]
+    corrected_avg = round(sum(ages) / len(ages)) if ages else None
+    # Reverse the bias to recover the raw model prediction for accurate bias computation
+    current_bias = _pipeline._age_bias if _pipeline else 0.0
+    predicted_age = round(corrected_avg - current_bias) if corrected_avg is not None else None
+
+    stats = save_sample(session_id, body.real_age, predicted_age, frame_paths)
+
+    if _pipeline:
+        _pipeline.reload_bias()
+
+    training_started = False
+    if stats["can_finetune"] and _pipeline:
+        training_started = start_finetune_async(_pipeline)
+
+    return {
+        "status": "saved",
+        "n_samples": stats["n_samples"],
+        "bias": stats["bias"],
+        "training_started": training_started,
+    }
 
 
 @app.get("/api/session/{session_id}/summary")
@@ -175,6 +216,8 @@ async def _store_faces(session_id: str, results: dict, frame, frame_count: int):
 @app.websocket("/ws/{session_id}")
 async def websocket_endpoint(websocket: WebSocket, session_id: str):
     await websocket.accept()
+    if _pipeline:
+        _pipeline.reset_for_new_session()
     frame_count = 0
     loop = asyncio.get_event_loop()
 

@@ -10,12 +10,14 @@ services:
     volumes:
       - ./data/frames:/data/frames
       - ./data/chromadb:/data/chromadb
+      - ./data/training:/data/training
       - hf_cache:/root/.cache/huggingface
       - torch_cache:/root/.cache/torch
       - ultralytics_cache:/root/.config/Ultralytics
     environment:
       - FRAMES_PATH=/data/frames
       - CHROMADB_PATH=/data/chromadb
+      - TRAINING_PATH=/data/training
     restart: unless-stopped
 
   frontend:
