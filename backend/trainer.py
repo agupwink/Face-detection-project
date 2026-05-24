@@ -7,7 +7,7 @@ from pathlib import Path
 TRAINING_DIR = Path(os.getenv("TRAINING_PATH", "/data/training"))
 _SAMPLES_FILE = TRAINING_DIR / "samples.jsonl"
 _BIAS_FILE = TRAINING_DIR / "bias.json"
-_MIN_SAMPLES_TO_FINETUNE = 1
+_MIN_SAMPLES_TO_FINETUNE = 5
 
 _finetune_lock = threading.Lock()
 _finetune_running = False
