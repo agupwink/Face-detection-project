@@ -6,6 +6,7 @@ http://localhost:8000 before pytest is invoked.
 """
 
 import io
+import os
 import struct
 import uuid
 import zlib
@@ -13,7 +14,7 @@ import zlib
 import httpx
 import pytest
 
-BASE_URL = "http://localhost:8000"
+BASE_URL = os.getenv("TEST_BASE_URL", "http://localhost:8000")
 
 
 # ---------------------------------------------------------------------------

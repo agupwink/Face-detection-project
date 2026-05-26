@@ -28,6 +28,17 @@ services:
       - backend
     restart: unless-stopped
 
+  tests:
+    build:
+      context: .
+      dockerfile: Dockerfile.tests
+    depends_on:
+      - backend
+    environment:
+      - TEST_BASE_URL=http://backend:8000
+    profiles:
+      - test
+
 volumes:
   hf_cache:
   torch_cache:

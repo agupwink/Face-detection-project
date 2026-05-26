@@ -1,0 +1,12 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements-test.txt .
+RUN pip install --no-cache-dir -r requirements-test.txt
+
+COPY tests/ ./tests/
+
+ENV TEST_BASE_URL=http://backend:8000
+
+ENTRYPOINT ["pytest", "tests/", "-v", "--tb=short"]
