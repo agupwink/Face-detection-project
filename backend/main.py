@@ -16,7 +16,7 @@ from pydantic import BaseModel
 
 from pipeline import DetectionPipeline
 from embeddings import get_face_embedding
-from storage import store_detection, get_session_results, find_similar_faces
+from storage import store_detection, get_session_results, find_similar_faces, find_user_profile, update_user_profile, get_session_embedding
 from trainer import save_sample, start_finetune_async
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -24,8 +24,8 @@ FRAMES_PATH = os.getenv("FRAMES_PATH", os.path.join(_PROJECT_ROOT, "data", "fram
 os.makedirs(FRAMES_PATH, exist_ok=True)
 
 _pipeline: DetectionPipeline | None = None
-# Throttle frame saves per session: max one save every 2 seconds
 _last_save: dict[str, float] = {}
+_identified_sessions: set[str] = set()  # sessions where user has already been identified
 
 
 @asynccontextmanager
@@ -101,11 +101,13 @@ class FeedbackRequest(BaseModel):
 
 @app.post("/api/session/{session_id}/feedback")
 async def session_feedback(session_id: str, body: FeedbackRequest):
+    from fastapi.responses import JSONResponse
     if not (1 <= body.real_age <= 120):
-        from fastapi.responses import JSONResponse
         return JSONResponse({"error": "Age must be between 1 and 120"}, status_code=422)
 
     detections = get_session_results(session_id)
+    if not detections:
+        return JSONResponse({"error": "No detections found for this session"}, status_code=404)
     frame_paths = [
         str(Path(FRAMES_PATH) / d["frame_path"])
         for d in detections
@@ -113,14 +115,20 @@ async def session_feedback(session_id: str, body: FeedbackRequest):
     ]
     ages = [int(d["age"]) for d in detections if d.get("age") and str(d["age"]).isdigit()]
     corrected_avg = round(sum(ages) / len(ages)) if ages else None
-    # Reverse the bias to recover the raw model prediction for accurate bias computation
-    current_bias = _pipeline._age_bias if _pipeline else 0.0
+    current_bias = _pipeline._session_bias if _pipeline else 0.0
     predicted_age = round(corrected_avg - current_bias) if corrected_avg is not None else None
 
-    stats = save_sample(session_id, body.real_age, predicted_age, frame_paths)
+    # Update per-user profile
+    embedding = get_session_embedding(session_id)
+    if embedding:
+        existing_user_id, _ = find_user_profile(embedding)
+        user_id, new_bias = update_user_profile(embedding, existing_user_id, body.real_age, predicted_age)
+        print(f"[feedback] User {user_id[:8]}… bias updated to {new_bias:+.1f} yrs")
+    else:
+        new_bias = 0.0
 
-    if _pipeline:
-        _pipeline.reload_bias()
+    # Save to global trainer for fine-tuning
+    stats = save_sample(session_id, body.real_age, predicted_age, frame_paths)
 
     training_started = False
     if stats["can_finetune"] and _pipeline:
@@ -129,7 +137,7 @@ async def session_feedback(session_id: str, body: FeedbackRequest):
     return {
         "status": "saved",
         "n_samples": stats["n_samples"],
-        "bias": stats["bias"],
+        "personal_bias": new_bias,
         "training_started": training_started,
     }
 
@@ -189,6 +197,14 @@ async def _store_faces(session_id: str, results: dict, frame, frame_count: int):
 
         embedding = await loop.run_in_executor(None, get_face_embedding, face_roi)
 
+        # Identify user from first real embedding and apply their personal bias
+        if embedding and session_id not in _identified_sessions and _pipeline:
+            _identified_sessions.add(session_id)
+            user_id, bias = await loop.run_in_executor(None, find_user_profile, embedding)
+            if user_id and bias != 0.0:
+                _pipeline.set_session_bias(bias)
+                print(f"[session] Recognised user {user_id[:8]}… bias {bias:+.1f} yrs")
+
         frame_path = None
         if save_allowed:
             fname = f"{session_id}_{frame_count}.jpg"
@@ -216,6 +232,7 @@ async def _store_faces(session_id: str, results: dict, frame, frame_count: int):
 @app.websocket("/ws/{session_id}")
 async def websocket_endpoint(websocket: WebSocket, session_id: str):
     await websocket.accept()
+    _identified_sessions.discard(session_id)
     if _pipeline:
         _pipeline.reset_for_new_session()
     frame_count = 0

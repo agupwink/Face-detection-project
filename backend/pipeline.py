@@ -57,10 +57,7 @@ class DetectionPipeline:
             except Exception as e:
                 print(f"Fashion detector failed: {e}")
 
-        from trainer import load_bias
-        self._age_bias: float = load_bias()
-        if self._age_bias:
-            print(f"[pipeline] Age bias correction loaded: {self._age_bias:+.1f} yrs")
+        self._session_bias: float = 0.0  # per-user bias, reset each session
 
         # TTL caches: expire stale results after 1.5 s so boxes don't linger
         self._watch_cache: list = []
@@ -101,8 +98,8 @@ class DetectionPipeline:
                 if self.age_detector:
                     self.age_detector.submit(face_roi)
                     raw_age = self.age_detector.get_result()
-                    if raw_age is not None and self._age_bias != 0.0:
-                        corrected = max(1, round(int(raw_age) + self._age_bias))
+                    if raw_age is not None and self._session_bias != 0.0:
+                        corrected = max(1, round(int(raw_age) + self._session_bias))
                         raw_age = str(corrected)
                     face_data["age"] = raw_age
 
@@ -169,6 +166,7 @@ class DetectionPipeline:
     def reset_for_new_session(self) -> None:
         if self.age_detector:
             self.age_detector.reset()
+        self._session_bias = 0.0
         self._watch_cache = []
         self._fashion_cache = []
         self._acc_cache = []
@@ -176,10 +174,9 @@ class DetectionPipeline:
         self._fashion_expiry = 0.0
         self._acc_expiry = 0.0
 
-    def reload_bias(self) -> None:
-        from trainer import load_bias
-        self._age_bias = load_bias()
-        print(f"[pipeline] Age bias reloaded: {self._age_bias:+.1f} yrs")
+    def set_session_bias(self, bias: float) -> None:
+        self._session_bias = bias
+        print(f"[pipeline] Per-user bias applied: {bias:+.1f} yrs")
 
     def shutdown(self):
         if self.age_detector:

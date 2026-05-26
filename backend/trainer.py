@@ -49,7 +49,8 @@ def start_finetune_async(pipeline) -> bool:
         if _finetune_running:
             return False
         samples = _load_samples()
-        if len(samples) < _MIN_SAMPLES_TO_FINETUNE:
+        valid = [s for s in samples if any(os.path.exists(fp) for fp in s.get("frame_paths", []))]
+        if len(valid) < _MIN_SAMPLES_TO_FINETUNE:
             return False
         _finetune_running = True
     threading.Thread(target=_run_finetune, args=(pipeline, samples), daemon=True).start()
