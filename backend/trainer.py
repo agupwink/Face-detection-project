@@ -7,7 +7,42 @@ from pathlib import Path
 TRAINING_DIR = Path(os.getenv("TRAINING_PATH", "/data/training"))
 _SAMPLES_FILE = TRAINING_DIR / "samples.jsonl"
 _BIAS_FILE = TRAINING_DIR / "bias.json"
+_AGE_GROUP_BIAS_FILE = TRAINING_DIR / "age_group_bias.json"
 _MIN_SAMPLES_TO_FINETUNE = 5
+_AGE_GROUPS = [(0, 20, "0-20"), (21, 40, "21-40"), (41, 60, "41-60"), (61, 120, "61+")]
+
+
+def _get_age_group(age: int) -> str:
+    for lo, hi, label in _AGE_GROUPS:
+        if lo <= age <= hi:
+            return label
+    return "61+"
+
+
+def update_age_group_bias(real_age: int, raw_predicted_age: int) -> None:
+    TRAINING_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        data = json.loads(_AGE_GROUP_BIAS_FILE.read_text()) if _AGE_GROUP_BIAS_FILE.exists() else {}
+    except Exception:
+        data = {}
+    group = _get_age_group(real_age)
+    entry = data.get(group, {"bias": 0.0, "n": 0})
+    n, old_bias = entry["n"], entry["bias"]
+    new_bias = round((old_bias * n + (real_age - raw_predicted_age)) / (n + 1), 2)
+    data[group] = {"bias": new_bias, "n": n + 1}
+    _AGE_GROUP_BIAS_FILE.write_text(json.dumps(data, indent=2))
+    print(f"[trainer] Age group '{group}' bias: {new_bias:+.2f} yrs ({n + 1} samples)")
+
+
+def load_age_group_bias() -> dict:
+    """Return {group_label: bias_float} for all age groups."""
+    if not _AGE_GROUP_BIAS_FILE.exists():
+        return {}
+    try:
+        data = json.loads(_AGE_GROUP_BIAS_FILE.read_text())
+        return {k: float(v["bias"]) for k, v in data.items()}
+    except Exception:
+        return {}
 
 _finetune_lock = threading.Lock()
 _finetune_running = False

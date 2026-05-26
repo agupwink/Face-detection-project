@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from pipeline import DetectionPipeline
 from embeddings import get_face_embedding
 from storage import store_detection, get_session_results, find_similar_faces, find_user_profile, update_user_profile, get_session_embedding
-from trainer import save_sample, start_finetune_async
+from trainer import save_sample, start_finetune_async, update_age_group_bias
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FRAMES_PATH = os.getenv("FRAMES_PATH", os.path.join(_PROJECT_ROOT, "data", "frames"))
@@ -126,6 +126,12 @@ async def session_feedback(session_id: str, body: FeedbackRequest):
         print(f"[feedback] User {user_id[:8]}… bias updated to {new_bias:+.1f} yrs")
     else:
         new_bias = 0.0
+
+    # Update age group bias for new users
+    if predicted_age is not None:
+        update_age_group_bias(body.real_age, predicted_age)
+        if _pipeline:
+            _pipeline.reload_age_group_bias()
 
     # Save to global trainer for fine-tuning
     stats = save_sample(session_id, body.real_age, predicted_age, frame_paths)

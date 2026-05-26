@@ -24,6 +24,13 @@ from face_detect import (
 )
 
 
+def _age_group(age: int) -> str:
+    if age <= 20: return "0-20"
+    if age <= 40: return "21-40"
+    if age <= 60: return "41-60"
+    return "61+"
+
+
 class DetectionPipeline:
     def __init__(self):
         if TRANSFORMERS_AVAILABLE:
@@ -58,6 +65,10 @@ class DetectionPipeline:
                 print(f"Fashion detector failed: {e}")
 
         self._session_bias: float = 0.0  # per-user bias, reset each session
+        from trainer import load_age_group_bias
+        self._age_group_bias: dict = load_age_group_bias()
+        if self._age_group_bias:
+            print(f"[pipeline] Age group biases loaded: {self._age_group_bias}")
 
         # TTL caches: expire stale results after 1.5 s so boxes don't linger
         self._watch_cache: list = []
@@ -98,9 +109,12 @@ class DetectionPipeline:
                 if self.age_detector:
                     self.age_detector.submit(face_roi)
                     raw_age = self.age_detector.get_result()
-                    if raw_age is not None and self._session_bias != 0.0:
-                        corrected = max(1, round(int(raw_age) + self._session_bias))
-                        raw_age = str(corrected)
+                    if raw_age is not None:
+                        bias = self._session_bias
+                        if bias == 0.0 and self._age_group_bias:
+                            bias = self._age_group_bias.get(_age_group(int(raw_age)), 0.0)
+                        if bias != 0.0:
+                            raw_age = str(max(1, round(int(raw_age) + bias)))
                     face_data["age"] = raw_age
 
                 if self.acc_detector:
@@ -177,6 +191,11 @@ class DetectionPipeline:
     def set_session_bias(self, bias: float) -> None:
         self._session_bias = bias
         print(f"[pipeline] Per-user bias applied: {bias:+.1f} yrs")
+
+    def reload_age_group_bias(self) -> None:
+        from trainer import load_age_group_bias
+        self._age_group_bias = load_age_group_bias()
+        print(f"[pipeline] Age group biases reloaded: {self._age_group_bias}")
 
     def shutdown(self):
         if self.age_detector:
