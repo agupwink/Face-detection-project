@@ -15,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, field_validator
 
-from pipeline import DetectionPipeline
+from pipeline import DetectionPipeline, _age_group
 from embeddings import get_face_embedding
 from storage import store_detection, get_session_results, find_similar_faces, find_user_profile, update_user_profile, get_session_embedding
 from trainer import save_sample, start_finetune_async, update_age_group_bias
@@ -195,7 +195,14 @@ async def session_feedback(session_id: str, body: FeedbackRequest):
         ]
         ages = [int(d["age"]) for d in detections if d.get("age") and str(d["age"]).isdigit()]
         corrected_avg = round(sum(ages) / len(ages)) if ages else None
-        current_bias = _pipeline._session_bias if _pipeline else 0.0
+        # Determine which bias was actually applied during this session:
+        # - recognised user → personal session bias was used
+        # - new user → age group bias was used (must reverse using real_age's group)
+        if session_id in _identified_sessions:
+            current_bias = _pipeline._session_bias if _pipeline else 0.0
+        else:
+            group = _age_group(body.real_age)
+            current_bias = (_pipeline._age_group_bias.get(group, 0.0) if _pipeline else 0.0)
         predicted_age = round(corrected_avg - current_bias) if corrected_avg is not None else None
 
         # Update per-user profile
